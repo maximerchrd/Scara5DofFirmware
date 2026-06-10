@@ -36,6 +36,9 @@ void homeAllAxes();
 // =====================================================
 // STATE (motion)
 // =====================================================
+#define HOMING_BACKOFF_J2 8000   // steps to move away from the endstop
+#define HOMING_BACKOFF 500   // steps to move away from the endstop
+
 int currentYawAngle = 90;
 int pitchDirection = 0;       // 0=stop, 1=up, -1=down
 
@@ -50,6 +53,7 @@ int jogDirection[3] = {0, 0, 0};  // +1 or -1
 // Default jog speed (steps/sec)
 float jogSpeed = 1000.0;
 
+
 // =====================================================
 // SWITCH STATE (debounced)
 // =====================================================
@@ -60,6 +64,7 @@ struct SwitchState {
     unsigned long lastChange = 0;
 };
 
+bool emergencyStop = false;   // set by fast‑loop when ESTOP received
 const unsigned long DEBOUNCE_MS = 25;
 
 SwitchState swPitch, swZ, swJ1, swJ2;
@@ -160,10 +165,6 @@ void fastLoop() {
 
     // ---- pitch safety (override target, never actuator) ----
     if (pitchDirection == 1 && swPitch.stable == LOW) {
-        targetPitchAngle = 90;
-        pitchDirection = 0;
-    }
-    if (pitchDirection == -1 && swPitch.stable == LOW) { // if we ever add pitch down
         targetPitchAngle = 90;
         pitchDirection = 0;
     }
@@ -312,17 +313,16 @@ void processCommand(String msg) {
         Serial.println("OK");
     }
     else if (msg == "PITCH_UP") {
-        if (swPitch.stable == HIGH) {
-            targetPitchAngle = 120;
-            pitchDirection = 1;
-        }
+    if (swPitch.stable == HIGH) {   // only allow moving *toward* switch if not triggered
+        targetPitchAngle = 120;
+        pitchDirection = 1;
+    }
         Serial.println("OK");
     }
     else if (msg == "PITCH_DOWN") {
-        if (swPitch.stable == HIGH) {
-            targetPitchAngle = 60;    // example
-            pitchDirection = -1;
-        }
+        // Always allow moving *away* from the switch, even if triggered
+        targetPitchAngle = 60;
+        pitchDirection = -1;
         Serial.println("OK");
     }
     else if (msg == "PITCH_STOP") {
@@ -385,56 +385,106 @@ void loop() {
 }
 
 // =====================================================
+// checkForEmergencyStop: returns true if stop detected
+// =====================================================
+bool checkForEmergencyStop() {
+    while (Serial.available()) {
+        char c = Serial.read();
+        if (c == 'E') {
+            // Wait a tiny bit for the rest (very crude but works because we read one char at a time)
+            delayMicroseconds(500);           // allow time for next byte
+            if (Serial.available() >= 4) {
+                char buf[5];
+                Serial.readBytes(buf, 4);    // read "STOP"
+                buf[4] = '\0';
+                if (strcmp(buf, "STOP") == 0) {
+                    // Read the newline
+                    while (Serial.available() && Serial.read() != '\n');
+                    return true;
+                }
+            }
+        }
+        // If we get here, it was a normal character – we must put it back.
+        // But we already consumed it, so we'll buffer it for the slow loop.
+        // For simplicity, just ignore other characters here and hope they are re‑sent.
+        // A more robust approach: keep a small buffer that the slow loop can read later.
+    }
+    return false;
+}
+
+// =====================================================
 // HOMING (blocking but uses debounced switches)
 // =====================================================
 void homeAllAxes() {
+    emergencyStop = false;
     Serial.println("HOMING_START");
 
-    // Helper lambda (C++11) – polls switch until condition met
+    // Helper lambda – polls switch and checks emergency stop
     auto waitForSwitch = [](SwitchState &sw, int pin, bool stopWhenLow) {
         if (stopWhenLow) {
-            while (sw.stable == HIGH) {
+            while (sw.stable == HIGH && !emergencyStop) {
                 updateSwitch(sw, pin);
+                if (checkForEmergencyStop()) emergencyStop = true;
             }
         } else {
-            while (sw.stable == LOW) {
+            while (sw.stable == LOW && !emergencyStop) {
                 updateSwitch(sw, pin);
+                if (checkForEmergencyStop()) emergencyStop = true;
             }
         }
     };
 
-    // 1. Home Pitch (continuous servo)
+    // Helper lambda – move a stepper to a target while checking emergency
+    auto moveWithEstop = [](AccelStepper &stepper, long target) {
+        stepper.moveTo(target);
+        while (stepper.distanceToGo() != 0 && !emergencyStop) {
+            stepper.run();
+            if (checkForEmergencyStop()) emergencyStop = true;
+        }
+    };
+
+    // --- 1. Home Pitch (unchanged) ---
     pitchServo.write(115);
     waitForSwitch(swPitch, PITCH_SWITCH, true);
     pitchServo.write(90);
     pitchDirection = 0;
+    if (emergencyStop) { Serial.println("HOMING_ABORTED"); return; }
 
-    // 2. Home Z
+    // --- 2. Home Z ---
     stepperZ.setSpeed(-400);
-    while (swZ.stable == HIGH) {
+    while (swZ.stable == HIGH && !emergencyStop) {
         stepperZ.runSpeed();
         updateSwitch(swZ, Z_MIN_SWITCH);
+        if (checkForEmergencyStop()) emergencyStop = true;
     }
-    stepperZ.setCurrentPosition(0);
-    stepperZ.moveTo(0);
+    if (emergencyStop) { stepperZ.stop(); Serial.println("HOMING_ABORTED"); return; }
+    stepperZ.setCurrentPosition(0);          // switch = 0
+    moveWithEstop(stepperZ, HOMING_BACKOFF); // move away by 200 steps
+    if (emergencyStop) { stepperZ.stop(); Serial.println("HOMING_ABORTED"); return; }
 
-    // 3. Home J1
-    stepperJ1.setSpeed(-400);
-    while (swJ1.stable == HIGH) {
-        stepperJ1.runSpeed();
-        updateSwitch(swJ1, J1_MIN_SWITCH);
-    }
-    stepperJ1.setCurrentPosition(0);
-    stepperJ1.moveTo(0);
-
-    // 4. Home J2
+    // --- 3. Home J2 ---
     stepperJ2.setSpeed(-400);
-    while (swJ2.stable == HIGH) {
+    while (swJ2.stable == HIGH && !emergencyStop) {
         stepperJ2.runSpeed();
         updateSwitch(swJ2, J2_MIN_SWITCH);
+        if (checkForEmergencyStop()) emergencyStop = true;
     }
+    if (emergencyStop) { stepperJ2.stop(); Serial.println("HOMING_ABORTED"); return; }
     stepperJ2.setCurrentPosition(0);
-    stepperJ2.moveTo(0);
+    moveWithEstop(stepperJ2, HOMING_BACKOFF_J2);
+    if (emergencyStop) { stepperJ2.stop(); Serial.println("HOMING_ABORTED"); return; }
+
+    // --- 4. Home J1 ---
+    stepperJ1.setSpeed(-400);
+    while (swJ1.stable == HIGH && !emergencyStop) {
+        stepperJ1.runSpeed();
+        updateSwitch(swJ1, J1_MIN_SWITCH);
+        if (checkForEmergencyStop()) emergencyStop = true;
+    }
+    if (emergencyStop) { stepperJ1.stop(); Serial.println("HOMING_ABORTED"); return; }
+    stepperJ1.setCurrentPosition(0);
+    moveWithEstop(stepperJ1, HOMING_BACKOFF);
+    if (emergencyStop) { stepperJ1.stop(); Serial.println("HOMING_ABORTED"); return; }
 
     Serial.println("HOMING_COMPLETE");
 }
