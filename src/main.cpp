@@ -443,15 +443,15 @@ void homeAllAxes() {
         }
     };
 
-    // --- 1. Home Pitch (unchanged) ---
-    pitchServo.write(115);
+    // --- 1. Home Pitch Disabled for now ---
+    /*pitchServo.write(115);
     waitForSwitch(swPitch, PITCH_SWITCH, true);
     pitchServo.write(90);
     pitchDirection = 0;
-    if (emergencyStop) { Serial.println("HOMING_ABORTED"); return; }
+    if (emergencyStop) { Serial.println("HOMING_ABORTED"); return; }*/
 
     // --- 2. Home Z ---
-    stepperZ.setSpeed(-400);
+    /*stepperZ.setSpeed(-400);
     while (swZ.stable == HIGH && !emergencyStop) {
         stepperZ.runSpeed();
         updateSwitch(swZ, Z_MIN_SWITCH);
@@ -460,7 +460,7 @@ void homeAllAxes() {
     if (emergencyStop) { stepperZ.stop(); Serial.println("HOMING_ABORTED"); return; }
     stepperZ.setCurrentPosition(0);          // switch = 0
     moveWithEstop(stepperZ, HOMING_BACKOFF); // move away by 200 steps
-    if (emergencyStop) { stepperZ.stop(); Serial.println("HOMING_ABORTED"); return; }
+    if (emergencyStop) { stepperZ.stop(); Serial.println("HOMING_ABORTED"); return; }*/
 
     // --- 3. Home J2 ---
     stepperJ2.setSpeed(-400);
