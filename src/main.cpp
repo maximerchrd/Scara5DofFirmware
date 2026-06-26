@@ -36,8 +36,17 @@ void homeAllAxes();
 // =====================================================
 // STATE (motion)
 // =====================================================
+// Physical joint angles at the home limit switch (degrees)
+// (measure or use your design values)
+#define J1_HOME_ANGLE_DEG  -105.0 
+#define J2_HOME_ANGLE_DEG  -150.0 
+
 #define HOMING_BACKOFF_J2 8000   // steps to move away from the endstop
 #define HOMING_BACKOFF 500   // steps to move away from the endstop
+
+// Steps per degree (must match your Python kinematics exactly)
+const float STEPS_PER_DEG_J1 = 139.31;
+const float STEPS_PER_DEG_J2 = 63.83;
 
 int currentYawAngle = 90;
 int pitchDirection = 0;       // 0=stop, 1=up, -1=down
@@ -450,19 +459,8 @@ void homeAllAxes() {
     pitchDirection = 0;
     if (emergencyStop) { Serial.println("HOMING_ABORTED"); return; }*/
 
-    // --- 2. Home Z ---
-    /*stepperZ.setSpeed(-400);
-    while (swZ.stable == HIGH && !emergencyStop) {
-        stepperZ.runSpeed();
-        updateSwitch(swZ, Z_MIN_SWITCH);
-        if (checkForEmergencyStop()) emergencyStop = true;
-    }
-    if (emergencyStop) { stepperZ.stop(); Serial.println("HOMING_ABORTED"); return; }
-    stepperZ.setCurrentPosition(0);          // switch = 0
-    moveWithEstop(stepperZ, HOMING_BACKOFF); // move away by 200 steps
-    if (emergencyStop) { stepperZ.stop(); Serial.println("HOMING_ABORTED"); return; }*/
 
-    // --- 3. Home J2 ---
+    // --- 2. Home J2 ---
     stepperJ2.setSpeed(-400);
     while (swJ2.stable == HIGH && !emergencyStop) {
         stepperJ2.runSpeed();
@@ -470,11 +468,16 @@ void homeAllAxes() {
         if (checkForEmergencyStop()) emergencyStop = true;
     }
     if (emergencyStop) { stepperJ2.stop(); Serial.println("HOMING_ABORTED"); return; }
-    stepperJ2.setCurrentPosition(0);
-    moveWithEstop(stepperJ2, HOMING_BACKOFF_J2);
+
+    // Set step counter to physical position at the limit switch
+    long j2_switch_steps = (long)(J2_HOME_ANGLE_DEG * STEPS_PER_DEG_J2);
+    stepperJ2.setCurrentPosition(j2_switch_steps);
+
+    // Back off by exactly HOMING_BACKOFF_J2 steps (relative to switch position)
+    moveWithEstop(stepperJ2, j2_switch_steps + HOMING_BACKOFF_J2);
     if (emergencyStop) { stepperJ2.stop(); Serial.println("HOMING_ABORTED"); return; }
 
-    // --- 4. Home J1 ---
+    // --- 3. Home J1 ---
     stepperJ1.setSpeed(-400);
     while (swJ1.stable == HIGH && !emergencyStop) {
         stepperJ1.runSpeed();
@@ -482,8 +485,11 @@ void homeAllAxes() {
         if (checkForEmergencyStop()) emergencyStop = true;
     }
     if (emergencyStop) { stepperJ1.stop(); Serial.println("HOMING_ABORTED"); return; }
-    stepperJ1.setCurrentPosition(0);
-    moveWithEstop(stepperJ1, HOMING_BACKOFF);
+
+    long j1_switch_steps = (long)(J1_HOME_ANGLE_DEG * STEPS_PER_DEG_J1);
+    stepperJ1.setCurrentPosition(j1_switch_steps);
+
+    moveWithEstop(stepperJ1, j1_switch_steps + HOMING_BACKOFF);
     if (emergencyStop) { stepperJ1.stop(); Serial.println("HOMING_ABORTED"); return; }
 
     Serial.println("HOMING_COMPLETE");
