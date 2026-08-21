@@ -21,6 +21,18 @@
 #define J1_MIN_SWITCH 23
 #define J2_MIN_SWITCH 24
 
+#define DISTANCE_SENSOR_PIN A1
+
+
+// =====================================================
+// Distance Sensor
+// =====================================================
+const int number_distance_samples = 300;
+float distance_readings[number_distance_samples] = {0};
+int current_distance_reading_index = 0;
+float calculateDistanceCM(int rawAdc);
+
+
 // =====================================================
 // MOTORS
 // =====================================================
@@ -123,6 +135,8 @@ void setup() {
     pinMode(J1_MIN_SWITCH, INPUT_PULLUP);
     pinMode(J2_MIN_SWITCH, INPUT_PULLUP);
 
+    pinMode(DISTANCE_SENSOR_PIN, INPUT);
+
     // initialise switch states
     swPitch.raw = swPitch.stable = swPitch.lastRaw = digitalRead(PITCH_SWITCH);
     swZ.raw     = swZ.stable     = swZ.lastRaw     = digitalRead(Z_MIN_SWITCH);
@@ -220,6 +234,12 @@ void slowLoop() {
         lastPosReport = millis();
         sendPositionUpdate();
     }
+
+    // Distance reading
+    int current_distance_reading = analogRead(DISTANCE_SENSOR_PIN);
+    distance_readings[current_distance_reading_index] = calculateDistanceCM(current_distance_reading);
+    current_distance_reading_index++;
+    current_distance_reading_index %= number_distance_samples;
 }
 
 // =====================================================
@@ -373,7 +393,15 @@ void sendPositionUpdate() {
     Serial.print(",");
     Serial.print(stepperJ2.currentPosition());
     Serial.print(",");
-    Serial.println(currentYawAngle);
+    Serial.print(currentYawAngle);
+    Serial.print(",");
+
+    float average_distance = 0;
+    for (int i = 0; i < number_distance_samples; i++) {
+        average_distance += distance_readings[i];
+    }
+    average_distance /= number_distance_samples;
+    Serial.println(average_distance);
 }
 
 // =====================================================
@@ -493,4 +521,23 @@ void homeAllAxes() {
     if (emergencyStop) { stepperJ1.stop(); Serial.println("HOMING_ABORTED"); return; }
 
     Serial.println("HOMING_COMPLETE");
+}
+
+// Function Definition
+float calculateDistanceCM(int rawAdc) {
+    const int NUM_POINTS = 9;
+    const int rawADC[]  = {366,  375,  386, 400, 407, 420, 427, 432, 437};
+    const int distCM[]  = {320,  311,  300, 290, 280,  270,  265,  259, 255};
+
+    //return rawAdc;
+    if (rawAdc <= rawADC[0]) return distCM[0];
+    if (rawAdc >= rawADC[NUM_POINTS - 1]) return distCM[NUM_POINTS - 1];
+
+    for (int i = 0; i < NUM_POINTS - 1; i++) {
+        if (rawAdc >= rawADC[i] && rawAdc <= rawADC[i + 1]) {
+            float fraction = (float)(rawAdc - rawADC[i]) / (rawADC[i + 1] - rawADC[i]);
+            return distCM[i] + fraction * (distCM[i + 1] - distCM[i]);
+        }
+    }
+    return 150.0;
 }
