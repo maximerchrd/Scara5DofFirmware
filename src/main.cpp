@@ -49,12 +49,11 @@ void homeAllAxes();
 // STATE (motion)
 // =====================================================
 // Physical joint angles at the home limit switch (degrees)
-// (measure or use your design values)
-#define J1_HOME_ANGLE_DEG  -105.0 
-#define J2_HOME_ANGLE_DEG  -150.0 
+#define J1_HOME_ANGLE_DEG  -105.0
+#define J2_HOME_ANGLE_DEG  -150.0
 
-#define HOMING_BACKOFF_J2 8000   // steps to move away from the endstop
-#define HOMING_BACKOFF 500   // steps to move away from the endstop
+#define HOMING_BACKOFF_J2 14000   // steps to move away from the endstop
+#define HOMING_BACKOFF 500       // steps to move away from the endstop
 
 // Steps per degree (must match your Python kinematics exactly)
 const float STEPS_PER_DEG_J1 = 139.31;
@@ -107,11 +106,11 @@ unsigned long lastSlowLoop = 0;
 unsigned long lastPosReport = 0;
 
 const unsigned long FAST_PERIOD_US = 1000;   // 1 kHz
-const unsigned long SLOW_PERIOD_MS = 20;     // 50 Hz (for serial RX & servo refresh)
-const unsigned long POS_REPORT_MS = 100;     // 10 Hz position updates
+const unsigned long SLOW_PERIOD_MS = 20;     // 50 Hz
+const unsigned long POS_REPORT_MS = 100;     // 10 Hz
 
 // =====================================================
-// SWITCH UPDATE FUNCTION (fast‑loop only)
+// SWITCH UPDATE FUNCTION
 // =====================================================
 void updateSwitch(SwitchState &s, int pin) {
     int r = digitalRead(pin);
@@ -137,13 +136,11 @@ void setup() {
 
     pinMode(DISTANCE_SENSOR_PIN, INPUT);
 
-    // initialise switch states
     swPitch.raw = swPitch.stable = swPitch.lastRaw = digitalRead(PITCH_SWITCH);
     swZ.raw     = swZ.stable     = swZ.lastRaw     = digitalRead(Z_MIN_SWITCH);
     swJ1.raw    = swJ1.stable    = swJ1.lastRaw    = digitalRead(J1_MIN_SWITCH);
     swJ2.raw    = swJ2.stable    = swJ2.lastRaw    = digitalRead(J2_MIN_SWITCH);
 
-    // store initial stables for comparison
     swStablePrev[0] = swPitch.stable;
     swStablePrev[1] = swZ.stable;
     swStablePrev[2] = swJ1.stable;
@@ -168,25 +165,18 @@ void setup() {
 }
 
 // =====================================================
-// FAST LOOP (1 kHz) – motion + safety state only
+// FAST LOOP (1 kHz)
 // =====================================================
 void fastLoop() {
-    // ---- steppers (always run) ----
     stepperZ.run();
     stepperJ1.run();
     stepperJ2.run();
 
-    // ---- update switches ----
     updateSwitch(swPitch, PITCH_SWITCH);
     updateSwitch(swZ, Z_MIN_SWITCH);
     updateSwitch(swJ1, J1_MIN_SWITCH);
     updateSwitch(swJ2, J2_MIN_SWITCH);
 
-    // ---- check for switch state changes (for event sending in slow loop) ----
-    // This flag is read in slowLoop()
-    // (handled later)
-
-    // ---- pitch safety (override target, never actuator) ----
     if (pitchDirection == 1 && swPitch.stable == LOW) {
         targetPitchAngle = 90;
         pitchDirection = 0;
@@ -194,10 +184,9 @@ void fastLoop() {
 }
 
 // =====================================================
-// SLOW LOOP (50 Hz) – serial, servo refresh, event sending
+// SLOW LOOP (50 Hz)
 // =====================================================
 void slowLoop() {
-    // ---- serial RX ----
     while (Serial.available()) {
         char c = Serial.read();
         if (c == '\n') {
@@ -210,13 +199,11 @@ void slowLoop() {
         }
     }
 
-    // ---- servo writes (50 Hz is perfect) ----
     yawServo.write(targetYawAngle);
     pitchServo.write(targetPitchAngle);
     gripServo.write(targetGripAngle);
     currentYawAngle = targetYawAngle;
 
-    // ---- event: switch change detection ----
     bool switchChanged = false;
     int currentStable[4] = {swPitch.stable, swZ.stable, swJ1.stable, swJ2.stable};
     for (int i = 0; i < 4; i++) {
@@ -229,13 +216,11 @@ void slowLoop() {
         sendSwitchUpdate();
     }
 
-    // ---- periodic position update (every 100 ms) ----
     if (millis() - lastPosReport >= POS_REPORT_MS) {
         lastPosReport = millis();
         sendPositionUpdate();
     }
 
-    // Distance reading
     int current_distance_reading = analogRead(DISTANCE_SENSOR_PIN);
     distance_readings[current_distance_reading_index] = calculateDistanceCM(current_distance_reading);
     current_distance_reading_index++;
@@ -246,7 +231,6 @@ void slowLoop() {
 // COMMAND PROCESSOR
 // =====================================================
 void processCommand(String msg) {
-    // Absolute move: G0 Z<pos> A<pos> B<pos> Y<angle>
     if (msg.startsWith("G0")) {
         int zIdx = msg.indexOf('Z');
         int aIdx = msg.indexOf('A');
@@ -258,7 +242,6 @@ void processCommand(String msg) {
         if (bIdx != -1) stepperJ2.moveTo(msg.substring(bIdx + 1).toInt());
         if (yIdx != -1) targetYawAngle = msg.substring(yIdx + 1).toInt();
 
-        // Cancel any jog on that axis
         if (zIdx != -1) jogActive[0] = false;
         if (aIdx != -1) jogActive[1] = false;
         if (bIdx != -1) jogActive[2] = false;
@@ -266,11 +249,9 @@ void processCommand(String msg) {
         Serial.println("OK");
     }
 
-    // Jog start: JOG_START <axis> <direction>
     else if (msg.startsWith("JOG_START")) {
-        // format: "JOG_START Z +" or "JOG_START A -"
-        char axis = msg.charAt(10);   // after "JOG_START "
-        char dir  = msg.charAt(12);   // after space
+        char axis = msg.charAt(10);
+        char dir  = msg.charAt(12);
 
         int idx = -1;
         AccelStepper *stepper = nullptr;
@@ -286,7 +267,6 @@ void processCommand(String msg) {
             jogActive[idx] = true;
             jogDirection[idx] = sign;
 
-            // Set a target far away to keep moving
             long target = stepper->currentPosition() + sign * 1000000L;
             stepper->moveTo(target);
             Serial.println("OK");
@@ -295,9 +275,8 @@ void processCommand(String msg) {
         }
     }
 
-    // Jog stop: JOG_STOP <axis>
     else if (msg.startsWith("JOG_STOP")) {
-        char axis = msg.charAt(9);   // after "JOG_STOP "
+        char axis = msg.charAt(9);
         int idx = -1;
         AccelStepper *stepper = nullptr;
 
@@ -309,14 +288,13 @@ void processCommand(String msg) {
 
         if (stepper) {
             jogActive[idx] = false;
-            stepper->stop();   // immediate deceleration to a stop, no reversal
+            stepper->stop();
             Serial.println("OK");
         } else {
             Serial.println("ERR");
         }
     }
 
-    // Set max speed for jogging: SPEED <value>
     else if (msg.startsWith("SPEED")) {
         int val = msg.substring(6).toInt();
         if (val > 0) {
@@ -328,7 +306,6 @@ void processCommand(String msg) {
         }
     }
 
-    // Gripper & pitch commands
     else if (msg == "GRIP_OPEN") {
         targetGripAngle = 120;
         Serial.println("OK");
@@ -338,18 +315,17 @@ void processCommand(String msg) {
         Serial.println("OK");
     }
     else if (msg == "GRIP_STOP") {
-        targetGripAngle = 90;    // neutral = stop
+        targetGripAngle = 90;
         Serial.println("OK");
     }
     else if (msg == "PITCH_UP") {
-    if (swPitch.stable == HIGH) {   // only allow moving *toward* switch if not triggered
-        targetPitchAngle = 120;
-        pitchDirection = 1;
-    }
+        if (swPitch.stable == HIGH) {
+            targetPitchAngle = 120;
+            pitchDirection = 1;
+        }
         Serial.println("OK");
     }
     else if (msg == "PITCH_DOWN") {
-        // Always allow moving *away* from the switch, even if triggered
         targetPitchAngle = 60;
         pitchDirection = -1;
         Serial.println("OK");
@@ -360,7 +336,6 @@ void processCommand(String msg) {
         Serial.println("OK");
     }
 
-    // Homing (blocking – kept for now)
     else if (msg == "G28") {
         homeAllAxes();
     }
@@ -371,7 +346,7 @@ void processCommand(String msg) {
 }
 
 // =====================================================
-// EVENT HELPERS (only called from slow loop)
+// EVENT HELPERS
 // =====================================================
 void sendSwitchUpdate() {
     Serial.print("SW:");
@@ -422,41 +397,100 @@ void loop() {
 }
 
 // =====================================================
-// checkForEmergencyStop: returns true if stop detected
+// EMERGENCY STOP CHECK
 // =====================================================
 bool checkForEmergencyStop() {
     while (Serial.available()) {
         char c = Serial.read();
         if (c == 'E') {
-            // Wait a tiny bit for the rest (very crude but works because we read one char at a time)
-            delayMicroseconds(500);           // allow time for next byte
+            delayMicroseconds(500);
             if (Serial.available() >= 4) {
                 char buf[5];
-                Serial.readBytes(buf, 4);    // read "STOP"
+                Serial.readBytes(buf, 4);
                 buf[4] = '\0';
                 if (strcmp(buf, "STOP") == 0) {
-                    // Read the newline
                     while (Serial.available() && Serial.read() != '\n');
                     return true;
                 }
             }
         }
-        // If we get here, it was a normal character – we must put it back.
-        // But we already consumed it, so we'll buffer it for the slow loop.
-        // For simplicity, just ignore other characters here and hope they are re‑sent.
-        // A more robust approach: keep a small buffer that the slow loop can read later.
     }
     return false;
 }
 
 // =====================================================
-// HOMING (blocking but uses debounced switches)
+// MULTI-TOUCH HOMING HELPER
+// =====================================================
+// Returns the median switch counter value at the moment of trigger.
+// Used ONLY as a repeatable stopping point; the counter is still
+// re-labelled to (HOME_ANGLE_DEG * STEPS_PER_DEG) afterwards, exactly
+// like the single-touch version.
+long homeAxisWithRepeat(AccelStepper &stepper, SwitchState &sw, int pin,
+                        int repeats,
+                        float fast_speed,
+                        float slow_speed,
+                        long backoff_steps)
+{
+    long positions[8];
+    if (repeats > 8) repeats = 8;
+    int successful = 0;
+
+    for (int i = 0; i < repeats; i++) {
+        if (emergencyStop) break;
+
+        float approach = (i == 0) ? fast_speed : slow_speed;
+        stepper.setSpeed(approach);
+
+        while (sw.stable == HIGH && !emergencyStop) {
+            stepper.runSpeed();
+            updateSwitch(sw, pin);
+            if (checkForEmergencyStop()) emergencyStop = true;
+        }
+        if (emergencyStop) break;
+
+        positions[successful++] = stepper.currentPosition();
+
+        if (i < repeats - 1) {
+            stepper.setSpeed(-fast_speed);
+            stepper.move(backoff_steps);
+            while (stepper.distanceToGo() != 0 && !emergencyStop) {
+                stepper.run();
+                updateSwitch(sw, pin);
+                if (checkForEmergencyStop()) emergencyStop = true;
+            }
+
+            unsigned long release_start = millis();
+            while (sw.stable == LOW && !emergencyStop
+                   && (millis() - release_start) < 1000UL) {
+                updateSwitch(sw, pin);
+                delay(5);
+            }
+        }
+    }
+
+    if (emergencyStop || successful == 0) return 0;
+    if (successful == 1) return positions[0];
+
+    // Median
+    for (int i = 1; i < successful; i++) {
+        long key = positions[i];
+        int j = i - 1;
+        while (j >= 0 && positions[j] > key) {
+            positions[j + 1] = positions[j];
+            j--;
+        }
+        positions[j + 1] = key;
+    }
+    return positions[successful / 2];
+}
+
+// =====================================================
+// HOMING
 // =====================================================
 void homeAllAxes() {
     emergencyStop = false;
     Serial.println("HOMING_START");
 
-    // Helper lambda – polls switch and checks emergency stop
     auto waitForSwitch = [](SwitchState &sw, int pin, bool stopWhenLow) {
         if (stopWhenLow) {
             while (sw.stable == HIGH && !emergencyStop) {
@@ -471,7 +505,6 @@ void homeAllAxes() {
         }
     };
 
-    // Helper lambda – move a stepper to a target while checking emergency
     auto moveWithEstop = [](AccelStepper &stepper, long target) {
         stepper.moveTo(target);
         while (stepper.distanceToGo() != 0 && !emergencyStop) {
@@ -488,7 +521,7 @@ void homeAllAxes() {
     if (emergencyStop) { Serial.println("HOMING_ABORTED"); return; }*/
 
 
-    // --- 2. Home J2 ---
+    // --- 2. Home J2 (unchanged, single touch) ---
     stepperJ2.setSpeed(-400);
     while (swJ2.stable == HIGH && !emergencyStop) {
         stepperJ2.runSpeed();
@@ -497,22 +530,28 @@ void homeAllAxes() {
     }
     if (emergencyStop) { stepperJ2.stop(); Serial.println("HOMING_ABORTED"); return; }
 
-    // Set step counter to physical position at the limit switch
     long j2_switch_steps = (long)(J2_HOME_ANGLE_DEG * STEPS_PER_DEG_J2);
     stepperJ2.setCurrentPosition(j2_switch_steps);
 
-    // Back off by exactly HOMING_BACKOFF_J2 steps (relative to switch position)
     moveWithEstop(stepperJ2, j2_switch_steps + HOMING_BACKOFF_J2);
     if (emergencyStop) { stepperJ2.stop(); Serial.println("HOMING_ABORTED"); return; }
 
-    // --- 3. Home J1 ---
-    stepperJ1.setSpeed(-400);
-    while (swJ1.stable == HIGH && !emergencyStop) {
-        stepperJ1.runSpeed();
-        updateSwitch(swJ1, J1_MIN_SWITCH);
-        if (checkForEmergencyStop()) emergencyStop = true;
-    }
+
+    // --- 3. Home J1 (multi-touch for better repeatability) ---
+    // The multi-touch only affects WHERE the arm comes to rest physically.
+    // The counter is re-labelled to (J1_HOME_ANGLE_DEG * STEPS_PER_DEG_J1)
+    // exactly like the single-touch version, so the post-homing reset
+    // is identical to your reference.
+    long j1_avg = homeAxisWithRepeat(stepperJ1, swJ1, J1_MIN_SWITCH,
+                                     /*repeats=*/     3,       // 1 fast + 3 slow
+                                     /*fast_speed=*/ -400.0,
+                                     /*slow_speed=*/ -200.0,
+                                     /*backoff=*/     600);
     if (emergencyStop) { stepperJ1.stop(); Serial.println("HOMING_ABORTED"); return; }
+
+    // Diagnostic only — raw counter where the switch triggered.
+    Serial.print("j1_avg (raw switch counter) = ");
+    Serial.println(j1_avg);
 
     long j1_switch_steps = (long)(J1_HOME_ANGLE_DEG * STEPS_PER_DEG_J1);
     stepperJ1.setCurrentPosition(j1_switch_steps);
@@ -523,13 +562,14 @@ void homeAllAxes() {
     Serial.println("HOMING_COMPLETE");
 }
 
-// Function Definition
+// =====================================================
+// DISTANCE SENSOR
+// =====================================================
 float calculateDistanceCM(int rawAdc) {
     const int NUM_POINTS = 9;
     const int rawADC[]  = {366,  375,  386, 400, 407, 420, 427, 432, 437};
     const int distCM[]  = {320,  311,  300, 290, 280,  270,  265,  259, 255};
 
-    //return rawAdc;
     if (rawAdc <= rawADC[0]) return distCM[0];
     if (rawAdc >= rawADC[NUM_POINTS - 1]) return distCM[NUM_POINTS - 1];
 
