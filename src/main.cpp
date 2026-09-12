@@ -105,7 +105,7 @@ unsigned long lastFastLoop = 0;
 unsigned long lastSlowLoop = 0;
 unsigned long lastPosReport = 0;
 
-const unsigned long FAST_PERIOD_US = 1000;   // 1 kHz
+const unsigned long FAST_PERIOD_US = 250;   // 4 kHz
 const unsigned long SLOW_PERIOD_MS = 20;     // 50 Hz
 const unsigned long POS_REPORT_MS = 100;     // 10 Hz
 
