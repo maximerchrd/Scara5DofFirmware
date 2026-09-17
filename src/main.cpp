@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <AccelStepper.h>
 #include <Servo.h>
+#include <Wire.h>
 
 // =====================================================
 // PIN DEFINITIONS
@@ -34,6 +35,36 @@ float calculateDistanceCM(int rawAdc);
 
 
 // =====================================================
+// MMA8452Q ACCELEROMETER (direct register access)
+// =====================================================
+// Chip found at I2C 0x1C, WHO_AM_I = 0x2A (MMA8452Q).
+// The Adafruit_MMA8451 library refuses 0x2A, so we talk to it directly.
+
+#define MMA8452_ADDR              0x1C
+
+// Registers
+#define MMA8452_REG_STATUS        0x00
+#define MMA8452_REG_OUT_X_MSB     0x01
+#define MMA8452_REG_WHO_AM_I      0x0D
+#define MMA8452_REG_XYZ_DATA_CFG  0x0E
+#define MMA8452_REG_CTRL_REG1     0x2A
+
+bool  mma_ok = false;
+float pitch_zero_offset = 0.0;    // set via PITCH_ZERO command
+float current_pitch_deg = 0.0;    // reported in POS: line
+
+// Which physical axis is "pitch" depends on how you mounted the board.
+//   PITCH_AXIS_X -> pitch = atan2(-ax, sqrt(ay^2 + az^2))
+//   PITCH_AXIS_Y -> pitch = atan2(-ay, sqrt(ax^2 + az^2))
+//   PITCH_AXIS_Z -> pitch = atan2(-az, sqrt(ax^2 + ay^2))
+// Try X first; if the number doesn't respond when you tilt, try Y or Z.
+#define PITCH_AXIS_X 0
+#define PITCH_AXIS_Y 1
+#define PITCH_AXIS_Z 2
+#define PITCH_AXIS   PITCH_AXIS_Y
+
+
+// =====================================================
 // MOTORS
 // =====================================================
 AccelStepper stepperZ(AccelStepper::DRIVER, Z_STEP_PIN, Z_DIR_PIN);
@@ -48,14 +79,12 @@ void homeAllAxes();
 // =====================================================
 // STATE (motion)
 // =====================================================
-// Physical joint angles at the home limit switch (degrees)
 #define J1_HOME_ANGLE_DEG  -105.0
 #define J2_HOME_ANGLE_DEG  -150.0
 
-#define HOMING_BACKOFF_J2 14000   // steps to move away from the endstop
-#define HOMING_BACKOFF 500       // steps to move away from the endstop
+#define HOMING_BACKOFF_J2 14000
+#define HOMING_BACKOFF 500
 
-// Steps per degree (must match your Python kinematics exactly)
 const float STEPS_PER_DEG_J1 = 139.31;
 const float STEPS_PER_DEG_J2 = 63.83;
 
@@ -66,11 +95,9 @@ int targetYawAngle = 90;
 int targetPitchAngle = 90;
 int targetGripAngle = 90;
 
-// Jogging flags: for each stepper axis (0=Z, 1=A, 2=B)
 bool jogActive[3] = {false, false, false};
-int jogDirection[3] = {0, 0, 0};  // +1 or -1
+int jogDirection[3] = {0, 0, 0};
 
-// Default jog speed (steps/sec)
 float jogSpeed = 1000.0;
 
 
@@ -84,11 +111,11 @@ struct SwitchState {
     unsigned long lastChange = 0;
 };
 
-bool emergencyStop = false;   // set by fast‑loop when ESTOP received
+bool emergencyStop = false;
 const unsigned long DEBOUNCE_MS = 25;
 
 SwitchState swPitch, swZ, swJ1, swJ2;
-bool swStablePrev[4] = {HIGH, HIGH, HIGH, HIGH}; // stores previous stable state for change detection
+bool swStablePrev[4] = {HIGH, HIGH, HIGH, HIGH};
 
 // =====================================================
 // SERIAL
@@ -106,8 +133,8 @@ unsigned long lastSlowLoop = 0;
 unsigned long lastPosReport = 0;
 
 const unsigned long FAST_PERIOD_US = 250;   // 4 kHz
-const unsigned long SLOW_PERIOD_MS = 20;     // 50 Hz
-const unsigned long POS_REPORT_MS = 100;     // 10 Hz
+const unsigned long SLOW_PERIOD_MS = 20;    // 50 Hz
+const unsigned long POS_REPORT_MS = 100;    // 10 Hz
 
 // =====================================================
 // SWITCH UPDATE FUNCTION
@@ -124,18 +151,111 @@ void updateSwitch(SwitchState &s, int pin) {
 }
 
 // =====================================================
+// MMA8452Q LOW-LEVEL HELPERS
+// =====================================================
+void mma_write_reg(uint8_t reg, uint8_t val) {
+    Wire.beginTransmission(MMA8452_ADDR);
+    Wire.write(reg);
+    Wire.write(val);
+    Wire.endTransmission();
+}
+
+uint8_t mma_read_reg(uint8_t reg) {
+    Wire.beginTransmission(MMA8452_ADDR);
+    Wire.write(reg);
+    Wire.endTransmission(false);
+    Wire.requestFrom(MMA8452_ADDR, (uint8_t)1);
+    if (Wire.available()) return Wire.read();
+    return 0;
+}
+
+// Put chip in standby -> configure -> active
+bool mma_init() {
+    uint8_t id = mma_read_reg(MMA8452_REG_WHO_AM_I);
+    if (id != 0x1A && id != 0x2A && id != 0x3A) {
+        Serial.print("MMA8452 bad WHO_AM_I: 0x");
+        Serial.println(id, HEX);
+        return false;
+    }
+
+    // Must be in standby to change registers
+    mma_write_reg(MMA8452_REG_CTRL_REG1, 0x00);
+    delay(10);
+
+    // +/-2g range
+    mma_write_reg(MMA8452_REG_XYZ_DATA_CFG, 0x00);
+    delay(10);
+
+    // 100 Hz data rate, active mode
+    // CTRL_REG1: DR2:DR1:DR0 = 011 (100 Hz), ACTIVE = 1  ->  0x19
+    mma_write_reg(MMA8452_REG_CTRL_REG1, 0x19);
+    delay(10);
+
+    return true;
+}
+
+// Read XYZ accelerations in g. Returns false on I2C failure.
+bool mma_read_accel(float &ax, float &ay, float &az) {
+    Wire.beginTransmission(MMA8452_ADDR);
+    Wire.write(MMA8452_REG_OUT_X_MSB);
+    Wire.endTransmission(false);
+    Wire.requestFrom(MMA8452_ADDR, (uint8_t)6);
+    if (Wire.available() < 6) return false;
+
+    // Data is 12-bit, left-justified in 16-bit registers
+    int16_t x = ((int16_t)Wire.read() << 8) | Wire.read();
+    int16_t y = ((int16_t)Wire.read() << 8) | Wire.read();
+    int16_t z = ((int16_t)Wire.read() << 8) | Wire.read();
+
+    // Shift right by 4 to get 12-bit signed values
+    x >>= 4;
+    y >>= 4;
+    z >>= 4;
+
+    // At +/-2g, 1024 counts per g (12-bit signed -> +/-2048)
+    const float scale = 1.0f / 1024.0f;
+    ax = x * scale;
+    ay = y * scale;
+    az = z * scale;
+    return true;
+}
+
+// =====================================================
+// PITCH HELPER
+// =====================================================
+float read_raw_pitch_deg() {
+    if (!mma_ok) return 0.0;
+
+    float ax, ay, az;
+    if (!mma_read_accel(ax, ay, az)) return current_pitch_deg;
+
+#if PITCH_AXIS == PITCH_AXIS_X
+    return atan2(-ax, sqrt(ay*ay + az*az)) * 180.0f / PI;
+#elif PITCH_AXIS == PITCH_AXIS_Y
+    return atan2(-ay, sqrt(ax*ax + az*az)) * 180.0f / PI;
+#else
+    return atan2(-az, sqrt(ax*ax + ay*ay)) * 180.0f / PI;
+#endif
+}
+
+// =====================================================
 // SETUP
 // =====================================================
 void setup() {
+    // ---- Serial ----
     Serial.begin(115200);
+    delay(200);
+    Serial.println("BOOT: serial up");
 
+    // ---- Input pins ----
     pinMode(PITCH_SWITCH, INPUT_PULLUP);
     pinMode(Z_MIN_SWITCH, INPUT_PULLUP);
     pinMode(J1_MIN_SWITCH, INPUT_PULLUP);
     pinMode(J2_MIN_SWITCH, INPUT_PULLUP);
-
     pinMode(DISTANCE_SENSOR_PIN, INPUT);
+    Serial.println("BOOT: pins configured");
 
+    // ---- Initialise switch states ----
     swPitch.raw = swPitch.stable = swPitch.lastRaw = digitalRead(PITCH_SWITCH);
     swZ.raw     = swZ.stable     = swZ.lastRaw     = digitalRead(Z_MIN_SWITCH);
     swJ1.raw    = swJ1.stable    = swJ1.lastRaw    = digitalRead(J1_MIN_SWITCH);
@@ -145,7 +265,9 @@ void setup() {
     swStablePrev[1] = swZ.stable;
     swStablePrev[2] = swJ1.stable;
     swStablePrev[3] = swJ2.stable;
+    Serial.println("BOOT: switches initialised");
 
+    // ---- Servos ----
     yawServo.attach(YAW_SERVO_PIN);
     gripServo.attach(GRIP_SERVO_PIN);
     pitchServo.attach(PITCH_SERVO_PIN);
@@ -153,19 +275,37 @@ void setup() {
     yawServo.write(currentYawAngle);
     gripServo.write(90);
     pitchServo.write(90);
+    Serial.println("BOOT: servos attached");
 
+    // ---- Steppers ----
     stepperZ.setMaxSpeed(jogSpeed);
     stepperZ.setAcceleration(3000);
     stepperJ1.setMaxSpeed(jogSpeed);
     stepperJ1.setAcceleration(3000);
     stepperJ2.setMaxSpeed(jogSpeed);
     stepperJ2.setAcceleration(3000);
+    Serial.println("BOOT: steppers configured");
+
+    // ---- MMA8452Q init ----
+    Serial.println("BOOT: calling Wire.begin()");
+    Wire.begin();
+    Wire.setClock(50000);
+    Serial.println("BOOT: Wire ready");
+
+    Serial.println("BOOT: initialising MMA8452Q");
+    if (mma_init()) {
+        mma_ok = true;
+        Serial.println("MMA8452_INIT_OK");
+    } else {
+        mma_ok = false;
+        Serial.println("MMA8452_INIT_FAIL");
+    }
 
     Serial.println("SYSTEM_READY");
 }
 
 // =====================================================
-// FAST LOOP (1 kHz)
+// FAST LOOP (4 kHz)
 // =====================================================
 void fastLoop() {
     stepperZ.run();
@@ -203,6 +343,11 @@ void slowLoop() {
     pitchServo.write(targetPitchAngle);
     gripServo.write(targetGripAngle);
     currentYawAngle = targetYawAngle;
+
+    // --- MMA8452Q update ---
+    if (mma_ok) {
+        current_pitch_deg = read_raw_pitch_deg() - pitch_zero_offset;
+    }
 
     bool switchChanged = false;
     int currentStable[4] = {swPitch.stable, swZ.stable, swJ1.stable, swJ2.stable};
@@ -335,6 +480,43 @@ void processCommand(String msg) {
         pitchDirection = 0;
         Serial.println("OK");
     }
+    else if (msg == "PITCH_GET") {
+        if (mma_ok) {
+            Serial.print("PITCH:");
+            Serial.println(current_pitch_deg, 2);
+        } else {
+            Serial.println("PITCH:nan");
+        }
+    }
+    else if (msg == "PITCH_ZERO") {
+        if (mma_ok) {
+            pitch_zero_offset = read_raw_pitch_deg();
+            current_pitch_deg = 0.0;
+            Serial.println("OK");
+        } else {
+            Serial.println("ERR");
+        }
+    }
+    else if (msg == "PITCH_RAW") {
+        // Debug helper: prints raw accel values and un-offset pitch
+        if (mma_ok) {
+            float ax, ay, az;
+            if (mma_read_accel(ax, ay, az)) {
+                Serial.print("ACC:");
+                Serial.print(ax, 3);
+                Serial.print(",");
+                Serial.print(ay, 3);
+                Serial.print(",");
+                Serial.print(az, 3);
+                Serial.print(",");
+                Serial.println(read_raw_pitch_deg(), 2);
+            } else {
+                Serial.println("ACC:read_failed");
+            }
+        } else {
+            Serial.println("ACC:nan");
+        }
+    }
 
     else if (msg == "G28") {
         homeAllAxes();
@@ -376,7 +558,15 @@ void sendPositionUpdate() {
         average_distance += distance_readings[i];
     }
     average_distance /= number_distance_samples;
-    Serial.println(average_distance);
+    Serial.print(average_distance);
+
+    // 6th field: pitch in degrees (or "nan" if accelerometer not available)
+    Serial.print(",");
+    if (mma_ok) {
+        Serial.println(current_pitch_deg, 2);
+    } else {
+        Serial.println("nan");
+    }
 }
 
 // =====================================================
@@ -421,10 +611,6 @@ bool checkForEmergencyStop() {
 // =====================================================
 // MULTI-TOUCH HOMING HELPER
 // =====================================================
-// Returns the median switch counter value at the moment of trigger.
-// Used ONLY as a repeatable stopping point; the counter is still
-// re-labelled to (HOME_ANGLE_DEG * STEPS_PER_DEG) afterwards, exactly
-// like the single-touch version.
 long homeAxisWithRepeat(AccelStepper &stepper, SwitchState &sw, int pin,
                         int repeats,
                         float fast_speed,
@@ -471,7 +657,6 @@ long homeAxisWithRepeat(AccelStepper &stepper, SwitchState &sw, int pin,
     if (emergencyStop || successful == 0) return 0;
     if (successful == 1) return positions[0];
 
-    // Median
     for (int i = 1; i < successful; i++) {
         long key = positions[i];
         int j = i - 1;
@@ -521,7 +706,7 @@ void homeAllAxes() {
     if (emergencyStop) { Serial.println("HOMING_ABORTED"); return; }*/
 
 
-    // --- 2. Home J2 (unchanged, single touch) ---
+    // --- 2. Home J2 ---
     stepperJ2.setSpeed(-400);
     while (swJ2.stable == HIGH && !emergencyStop) {
         stepperJ2.runSpeed();
@@ -537,19 +722,14 @@ void homeAllAxes() {
     if (emergencyStop) { stepperJ2.stop(); Serial.println("HOMING_ABORTED"); return; }
 
 
-    // --- 3. Home J1 (multi-touch for better repeatability) ---
-    // The multi-touch only affects WHERE the arm comes to rest physically.
-    // The counter is re-labelled to (J1_HOME_ANGLE_DEG * STEPS_PER_DEG_J1)
-    // exactly like the single-touch version, so the post-homing reset
-    // is identical to your reference.
+    // --- 3. Home J1 ---
     long j1_avg = homeAxisWithRepeat(stepperJ1, swJ1, J1_MIN_SWITCH,
-                                     /*repeats=*/     3,       // 1 fast + 3 slow
+                                     /*repeats=*/     3,
                                      /*fast_speed=*/ -400.0,
                                      /*slow_speed=*/ -200.0,
                                      /*backoff=*/     600);
     if (emergencyStop) { stepperJ1.stop(); Serial.println("HOMING_ABORTED"); return; }
 
-    // Diagnostic only — raw counter where the switch triggered.
     Serial.print("j1_avg (raw switch counter) = ");
     Serial.println(j1_avg);
 
