@@ -65,6 +65,23 @@ float current_pitch_deg = 0.0;    // reported in POS: line
 
 
 // =====================================================
+// PITCH FILTERING (median-of-3 + EMA)
+// =====================================================
+// Small EMA coefficient = smoother but slower.
+//   0.40 -> ~50% noise reduction, ~30 ms lag   (very snappy)
+//   0.25 -> ~62% noise reduction, ~60 ms lag   (balanced)
+//   0.15 -> ~72% noise reduction, ~110 ms lag  (recommended start)
+//   0.10 -> ~77% noise reduction, ~180 ms lag  (smooth, mild lag)
+//   0.05 -> ~84% noise reduction, ~380 ms lag  (very smooth, sluggish)
+//
+// Tune PITCH_EMA_ALPHA up if the reading feels laggy, down if still noisy.
+const float PITCH_EMA_ALPHA = 0.15f;
+
+float pitch_filtered_raw = 0.0f;        // filtered raw pitch (before zero offset)
+bool  pitch_filter_initialized = false; // seed the EMA with the first sample
+
+
+// =====================================================
 // MOTORS
 // =====================================================
 AccelStepper stepperZ(AccelStepper::DRIVER, Z_STEP_PIN, Z_DIR_PIN);
@@ -238,6 +255,43 @@ float read_raw_pitch_deg() {
 #endif
 }
 
+// Filtered raw pitch: 3-sample median (kills spikes) followed by an EMA.
+// The median adds essentially zero lag and is only active once 3 samples
+// have been collected. The EMA is seeded with the first sample so there is
+// no startup transient.
+float read_filtered_raw_pitch_deg() {
+    if (!mma_ok) return 0.0f;
+
+    float raw = read_raw_pitch_deg();
+
+    // --- 3-sample median (spike rejection) ---
+    static float m_a = 0.0f, m_b = 0.0f, m_c = 0.0f;
+    static uint8_t m_count = 0;
+
+    m_c = m_b;
+    m_b = m_a;
+    m_a = raw;
+    if (m_count < 3) m_count++;
+
+    float med;
+    if (m_count < 3) {
+        med = raw;
+    } else {
+        // median of m_a, m_b, m_c
+        med = max(min(m_a, m_b), min(max(m_a, m_b), m_c));
+    }
+
+    // --- EMA on top of the median ---
+    if (!pitch_filter_initialized) {
+        pitch_filtered_raw = med;
+        pitch_filter_initialized = true;
+    } else {
+        pitch_filtered_raw = PITCH_EMA_ALPHA * med
+                           + (1.0f - PITCH_EMA_ALPHA) * pitch_filtered_raw;
+    }
+    return pitch_filtered_raw;
+}
+
 // =====================================================
 // SETUP
 // =====================================================
@@ -344,9 +398,9 @@ void slowLoop() {
     gripServo.write(targetGripAngle);
     currentYawAngle = targetYawAngle;
 
-    // --- MMA8452Q update ---
+    // --- MMA8452Q update (filtered) ---
     if (mma_ok) {
-        current_pitch_deg = read_raw_pitch_deg() - pitch_zero_offset;
+        current_pitch_deg = read_filtered_raw_pitch_deg() - pitch_zero_offset;
     }
 
     bool switchChanged = false;
@@ -490,7 +544,8 @@ void processCommand(String msg) {
     }
     else if (msg == "PITCH_ZERO") {
         if (mma_ok) {
-            pitch_zero_offset = read_raw_pitch_deg();
+            // Use the filtered value so the zero offset isn't set from a noisy sample.
+            pitch_zero_offset = read_filtered_raw_pitch_deg();
             current_pitch_deg = 0.0;
             Serial.println("OK");
         } else {
@@ -499,6 +554,7 @@ void processCommand(String msg) {
     }
     else if (msg == "PITCH_RAW") {
         // Debug helper: prints raw accel values and un-offset pitch
+        // (unfiltered, so you can still see what the sensor itself reports)
         if (mma_ok) {
             float ax, ay, az;
             if (mma_read_accel(ax, ay, az)) {
