@@ -35,6 +35,20 @@ float calculateDistanceCM(int rawAdc);
 
 
 // =====================================================
+// PITCH SETPOINT (closed-loop on IMU angle)
+// =====================================================
+// PITCH_SET <deg>  drives the servo until current_pitch_deg is within
+// PITCH_DEADBAND_DEG of <deg>. NaN means "no active setpoint".
+float pitch_target_deg = NAN;
+const int PITCH_SPEED = 12;
+
+const float PITCH_DEADBAND_DEG = 2.0f;   // arrival tolerance (IMU degrees)
+const float PITCH_GAIN         = 0.30f;  // servo-deg per IMU-deg error per cycle
+const int   PITCH_SERVO_SIGN   = -1;      // flip to -1 if the servo drives the wrong way
+const int   PITCH_SERVO_MIN    = 10;     // mechanical safe limits
+const int   PITCH_SERVO_MAX    = 170;
+
+// =====================================================
 // MMA8452Q ACCELEROMETER (direct register access)
 // =====================================================
 // Chip found at I2C 0x1C, WHO_AM_I = 0x2A (MMA8452Q).
@@ -52,16 +66,6 @@ float calculateDistanceCM(int rawAdc);
 bool  mma_ok = false;
 float pitch_zero_offset = 0.0;    // set via PITCH_ZERO command
 float current_pitch_deg = 0.0;    // reported in POS: line
-
-// Which physical axis is "pitch" depends on how you mounted the board.
-//   PITCH_AXIS_X -> pitch = atan2(-ax, sqrt(ay^2 + az^2))
-//   PITCH_AXIS_Y -> pitch = atan2(-ay, sqrt(ax^2 + az^2))
-//   PITCH_AXIS_Z -> pitch = atan2(-az, sqrt(ax^2 + ay^2))
-// Try X first; if the number doesn't respond when you tilt, try Y or Z.
-#define PITCH_AXIS_X 0
-#define PITCH_AXIS_Y 1
-#define PITCH_AXIS_Z 2
-#define PITCH_AXIS   PITCH_AXIS_Y
 
 
 // =====================================================
@@ -246,13 +250,7 @@ float read_raw_pitch_deg() {
     float ax, ay, az;
     if (!mma_read_accel(ax, ay, az)) return current_pitch_deg;
 
-#if PITCH_AXIS == PITCH_AXIS_X
-    return atan2(-ax, sqrt(ay*ay + az*az)) * 180.0f / PI;
-#elif PITCH_AXIS == PITCH_AXIS_Y
-    return atan2(-ay, sqrt(ax*ax + az*az)) * 180.0f / PI;
-#else
-    return atan2(-az, sqrt(ax*ax + ay*ay)) * 180.0f / PI;
-#endif
+    return atan2(az, ay) * 180.0f / PI;
 }
 
 // Filtered raw pitch: 3-sample median (kills spikes) followed by an EMA.
@@ -403,6 +401,23 @@ void slowLoop() {
         current_pitch_deg = read_filtered_raw_pitch_deg() - pitch_zero_offset;
     }
 
+    // --- Pitch closed-loop (PITCH_SET) ---
+    if (!isnan(pitch_target_deg) && mma_ok) {
+        float err = pitch_target_deg - current_pitch_deg;
+
+        if (fabs(err) < PITCH_DEADBAND_DEG) {
+            targetPitchAngle = 90;                 // stop
+            pitchDirection   = 0;
+            pitch_target_deg = NAN;
+            Serial.println("PITCH_AT_TARGET");
+        } else {
+            int sign = (err > 0) ? 1 : -1;
+            sign *= PITCH_SERVO_SIGN;
+            targetPitchAngle = 90 + sign * PITCH_SPEED;   // same |speed| both ways
+            pitchDirection   = sign;
+        }
+    }
+
     bool switchChanged = false;
     int currentStable[4] = {swPitch.stable, swZ.stable, swJ1.stable, swJ2.stable};
     for (int i = 0; i < 4; i++) {
@@ -519,17 +534,20 @@ void processCommand(String msg) {
     }
     else if (msg == "PITCH_UP") {
         if (swPitch.stable == HIGH) {
+            pitch_target_deg = NAN;
             targetPitchAngle = 120;
             pitchDirection = 1;
         }
         Serial.println("OK");
     }
     else if (msg == "PITCH_DOWN") {
+        pitch_target_deg = NAN;
         targetPitchAngle = 60;
         pitchDirection = -1;
         Serial.println("OK");
     }
     else if (msg == "PITCH_STOP") {
+        pitch_target_deg = NAN;
         targetPitchAngle = 90;
         pitchDirection = 0;
         Serial.println("OK");
@@ -547,9 +565,20 @@ void processCommand(String msg) {
             // Use the filtered value so the zero offset isn't set from a noisy sample.
             pitch_zero_offset = read_filtered_raw_pitch_deg();
             current_pitch_deg = 0.0;
+            pitch_target_deg = NAN;
             Serial.println("OK");
         } else {
             Serial.println("ERR");
+        }
+    }
+    
+    else if (msg.startsWith("PITCH_SET ")) {
+        if (mma_ok) {
+            pitch_target_deg = msg.substring(10).toFloat();
+            // Seed direction so the first cycle nudges the right way.
+            Serial.println("OK");
+        } else {
+            Serial.println("ERR");   // no IMU -> no closed loop
         }
     }
     else if (msg == "PITCH_RAW") {
