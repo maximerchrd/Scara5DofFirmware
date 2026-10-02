@@ -106,7 +106,7 @@ void homeAllAxes();
 #define HOMING_BACKOFF_J2 14000
 #define HOMING_BACKOFF 500
 
-const float STEPS_PER_DEG_J1 = 139.31;
+const float STEPS_PER_DEG_J1 = 172.08;
 const float STEPS_PER_DEG_J2 = 63.83;
 
 int currentYawAngle = 90;
