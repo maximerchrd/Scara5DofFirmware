@@ -100,8 +100,8 @@ void homeAllAxes();
 // =====================================================
 // STATE (motion)
 // =====================================================
-#define J1_HOME_ANGLE_DEG  -105.0
-#define J2_HOME_ANGLE_DEG  -150.0
+#define J1_HOME_ANGLE_DEG  -103.44
+#define J2_HOME_ANGLE_DEG  -142.94
 
 #define HOMING_BACKOFF_J2 14000
 #define HOMING_BACKOFF 500
