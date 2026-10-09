@@ -6,21 +6,24 @@
 // =====================================================
 // PIN DEFINITIONS
 // =====================================================
-#define Z_DIR_PIN 8
-#define Z_STEP_PIN 9
-#define J1_DIR_PIN 10
-#define J1_STEP_PIN 11
+#define Z_DIR_PIN 12
+#define Z_STEP_PIN 13
+#define Z_EN_PIN 11
+#define J1_DIR_PIN 9
+#define J1_STEP_PIN 10
+#define J1_EN_PIN 8
 #define J2_DIR_PIN 6
 #define J2_STEP_PIN 7
+#define J2_EN_PIN 5
 
-#define YAW_SERVO_PIN 3
-#define PITCH_SERVO_PIN 2
-#define GRIP_SERVO_PIN 4
+#define YAW_SERVO_PIN 46
+#define PITCH_SERVO_PIN 48
+#define GRIP_SERVO_PIN 50
 
-#define PITCH_SWITCH 25
-#define Z_MIN_SWITCH 22
-#define J1_MIN_SWITCH 23
-#define J2_MIN_SWITCH 24
+#define PITCH_SWITCH 5
+#define Z_MIN_SWITCH 2
+#define J1_MIN_SWITCH 3
+#define J2_MIN_SWITCH 4
 
 #define DISTANCE_SENSOR_PIN A1
 
@@ -330,6 +333,13 @@ void setup() {
     Serial.println("BOOT: servos attached");
 
     // ---- Steppers ----
+    pinMode(Z_EN_PIN, OUTPUT);
+    digitalWrite(Z_EN_PIN, LOW);
+    pinMode(J1_EN_PIN, OUTPUT);
+    digitalWrite(J1_EN_PIN, LOW);
+    pinMode(J2_EN_PIN, OUTPUT);
+    digitalWrite(J2_EN_PIN, LOW);
+
     stepperZ.setMaxSpeed(jogSpeed);
     stepperZ.setAcceleration(3000);
     stepperJ1.setMaxSpeed(jogSpeed);
