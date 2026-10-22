@@ -6,27 +6,33 @@
 // =====================================================
 // PIN DEFINITIONS
 // =====================================================
-#define Z_DIR_PIN 12
-#define Z_STEP_PIN 13
-#define Z_EN_PIN 11
-#define J1_DIR_PIN 9
-#define J1_STEP_PIN 10
-#define J1_EN_PIN 8
-#define J2_DIR_PIN 6
-#define J2_STEP_PIN 7
-#define J2_EN_PIN 5
+#define Z_DIR_PIN 9
+#define Z_STEP_PIN 10
+#define Z_EN_PIN 8
+#define J1_DIR_PIN 6
+#define J1_STEP_PIN 7
+#define J1_EN_PIN 5
+#define J2_DIR_PIN 12
+#define J2_STEP_PIN 13
+#define J2_EN_PIN 11
 
 #define YAW_SERVO_PIN 46
 #define PITCH_SERVO_PIN 48
-#define GRIP_SERVO_PIN 50
+#define GRIP_SERVO_PIN 44
 
-#define PITCH_SWITCH 5
-#define Z_MIN_SWITCH 2
-#define J1_MIN_SWITCH 3
-#define J2_MIN_SWITCH 4
+#define PITCH_SWITCH A5
+#define Z_MIN_SWITCH A2
+#define J1_MIN_SWITCH A3
+#define J2_MIN_SWITCH A4
 
 #define DISTANCE_SENSOR_PIN A1
 
+
+// Analog switch threshold (0..1023 across 0..5V).
+// Idle  ~0.0 V -> ~0 counts
+// Trig  ~2.1 V -> ~430 counts
+// 1 V midpoint is safely between them and immune to small noise.
+const int SWITCH_ANALOG_THRESHOLD = 200;
 
 // =====================================================
 // Distance Sensor
@@ -122,7 +128,7 @@ int targetGripAngle = 90;
 bool jogActive[3] = {false, false, false};
 int jogDirection[3] = {0, 0, 0};
 
-float jogSpeed = 1000.0;
+float jogSpeed = 6000.0;
 
 
 // =====================================================
@@ -156,21 +162,26 @@ unsigned long lastFastLoop = 0;
 unsigned long lastSlowLoop = 0;
 unsigned long lastPosReport = 0;
 
-const unsigned long FAST_PERIOD_US = 250;   // 4 kHz
+const unsigned long FAST_PERIOD_US = 50;
 const unsigned long SLOW_PERIOD_MS = 20;    // 50 Hz
 const unsigned long POS_REPORT_MS = 100;    // 10 Hz
+
+int readSwitchDigital(int pin) {
+    return !digitalRead(pin);
+}
 
 // =====================================================
 // SWITCH UPDATE FUNCTION
 // =====================================================
 void updateSwitch(SwitchState &s, int pin) {
-    int r = digitalRead(pin);
-    if (r != s.lastRaw) {
-        s.lastRaw = r;
+    int reading = !digitalRead(pin);
+
+    if (reading != s.lastRaw) {
+        s.lastRaw = reading;
         s.lastChange = millis();
     }
     if ((millis() - s.lastChange) > DEBOUNCE_MS) {
-        s.stable = r;
+        s.stable = reading;
     }
 }
 
@@ -307,14 +318,14 @@ void setup() {
     pinMode(Z_MIN_SWITCH, INPUT_PULLUP);
     pinMode(J1_MIN_SWITCH, INPUT_PULLUP);
     pinMode(J2_MIN_SWITCH, INPUT_PULLUP);
-    pinMode(DISTANCE_SENSOR_PIN, INPUT);
+    pinMode(DISTANCE_SENSOR_PIN, INPUT_PULLUP);
     Serial.println("BOOT: pins configured");
 
     // ---- Initialise switch states ----
-    swPitch.raw = swPitch.stable = swPitch.lastRaw = digitalRead(PITCH_SWITCH);
-    swZ.raw     = swZ.stable     = swZ.lastRaw     = digitalRead(Z_MIN_SWITCH);
-    swJ1.raw    = swJ1.stable    = swJ1.lastRaw    = digitalRead(J1_MIN_SWITCH);
-    swJ2.raw    = swJ2.stable    = swJ2.lastRaw    = digitalRead(J2_MIN_SWITCH);
+    swPitch.raw = swPitch.stable = swPitch.lastRaw = readSwitchDigital(PITCH_SWITCH);
+    swZ.raw     = swZ.stable     = swZ.lastRaw     = readSwitchDigital(Z_MIN_SWITCH);
+    swJ1.raw    = swJ1.stable    = swJ1.lastRaw    = readSwitchDigital(J1_MIN_SWITCH);
+    swJ2.raw    = swJ2.stable    = swJ2.lastRaw    = readSwitchDigital(J2_MIN_SWITCH);
 
     swStablePrev[0] = swPitch.stable;
     swStablePrev[1] = swZ.stable;
@@ -341,17 +352,17 @@ void setup() {
     digitalWrite(J2_EN_PIN, LOW);
 
     stepperZ.setMaxSpeed(jogSpeed);
-    stepperZ.setAcceleration(3000);
+    stepperZ.setAcceleration(5000);
     stepperJ1.setMaxSpeed(jogSpeed);
-    stepperJ1.setAcceleration(3000);
+    stepperJ1.setAcceleration(5000);
     stepperJ2.setMaxSpeed(jogSpeed);
-    stepperJ2.setAcceleration(3000);
+    stepperJ2.setAcceleration(5000);
     Serial.println("BOOT: steppers configured");
 
     // ---- MMA8452Q init ----
     Serial.println("BOOT: calling Wire.begin()");
     Wire.begin();
-    Wire.setClock(50000);
+    Wire.setClock(100000);
     Serial.println("BOOT: Wire ready");
 
     Serial.println("BOOT: initialising MMA8452Q");
@@ -367,21 +378,27 @@ void setup() {
 }
 
 // =====================================================
-// FAST LOOP (4 kHz)
+// FAST LOOP
 // =====================================================
 void fastLoop() {
     stepperZ.run();
     stepperJ1.run();
     stepperJ2.run();
 
-    updateSwitch(swPitch, PITCH_SWITCH);
-    updateSwitch(swZ, Z_MIN_SWITCH);
-    updateSwitch(swJ1, J1_MIN_SWITCH);
-    updateSwitch(swJ2, J2_MIN_SWITCH);
+    // Read switches every ~2 ms, not every iteration
+    static unsigned long lastSwitchScanUs = 0;
+    unsigned long nowUs = micros();
+    if (nowUs - lastSwitchScanUs >= 2000UL) {
+        lastSwitchScanUs = nowUs;
+        updateSwitch(swPitch, PITCH_SWITCH);
+        updateSwitch(swZ,     Z_MIN_SWITCH);
+        updateSwitch(swJ1,    J1_MIN_SWITCH);
+        updateSwitch(swJ2,    J2_MIN_SWITCH);
+    }
 
     if (pitchDirection == 1 && swPitch.stable == LOW) {
         targetPitchAngle = 90;
-        pitchDirection = 0;
+        pitchDirection   = 0;
     }
 }
 
@@ -531,15 +548,15 @@ void processCommand(String msg) {
     }
 
     else if (msg == "GRIP_OPEN") {
-        targetGripAngle = 120;
+        targetGripAngle = 130;
         Serial.println("OK");
     }
     else if (msg == "GRIP_CLOSE") {
-        targetGripAngle = 60;
+        targetGripAngle = 40;
         Serial.println("OK");
     }
     else if (msg == "GRIP_STOP") {
-        targetGripAngle = 90;
+        //targetGripAngle = 90;
         Serial.println("OK");
     }
     else if (msg == "PITCH_UP") {
@@ -668,17 +685,13 @@ void sendPositionUpdate() {
 // MAIN LOOP
 // =====================================================
 void loop() {
-    unsigned long now = micros();
-
-    if (now - lastFastLoop >= FAST_PERIOD_US) {
-        lastFastLoop = now;
-        fastLoop();
-    }
+    fastLoop();                       // run steppers every iteration
 
     if (millis() - lastSlowLoop >= SLOW_PERIOD_MS) {
         lastSlowLoop = millis();
         slowLoop();
     }
+    
 }
 
 // =====================================================
