@@ -329,7 +329,7 @@ const long   Z_HOME_STEPS         = 112000;        // position assigned at the s
 // the software limit. All three match their homing direction.
 const int8_t Z_MIN_DIR  = Z_HOMING_DIR;
 const int8_t J1_MIN_DIR = J1_HOMING_DIR;
-const int8_t J2_MIN_DIR = -1;
+const int8_t J2_MIN_DIR = 1;
 
 // A limit switch must read pressed this long before motion is cut. Much
 // shorter than DEBOUNCE_MS so a fast jog doesn't overrun the switch.
@@ -643,6 +643,7 @@ void setup() {
     stepperJ1.setAcceleration(5000);
     stepperJ2.setMaxSpeed(jogSpeed);
     stepperJ2.setAcceleration(5000);
+    stepperJ2.setPinsInverted(true, false, false);   // reverse physical DIR
     Serial.println(F("BOOT: steppers configured"));
 
     Serial.println(F("BOOT: calling Wire.begin()"));
@@ -1195,7 +1196,7 @@ void homeAllAxes() {
 
     // --- 3. Home J2 ---
     const long j2_max = (long)(HOMING_MAX_TRAVEL_DEG * STEPS_PER_DEG_J2);
-    if (!seekSwitch(stepperJ2, swJ2, J2_MIN_SWITCH, -400, j2_max)) {
+    if (!seekSwitch(stepperJ2, swJ2, J2_MIN_SWITCH, 400, j2_max)) {
         homingFailed(F("J2 switch not found"));
         return;
     }
@@ -1203,7 +1204,7 @@ void homeAllAxes() {
     long j2_switch_steps = (long)(J2_HOME_ANGLE_DEG * STEPS_PER_DEG_J2);
     stepperJ2.setCurrentPosition(j2_switch_steps);
 
-    if (!moveWithEstop(stepperJ2, j2_switch_steps + HOMING_BACKOFF_J2)) {
+    if (!moveWithEstop(stepperJ2, j2_switch_steps - HOMING_BACKOFF_J2)) {
         homingFailed(nullptr);
         return;
     }
